@@ -6,7 +6,7 @@ import torch
 class ReverseDiffusion:
     @staticmethod
     @torch.no_grad()
-    def p_sample(model , x_t , t, betas ,clip_range=(-1.0, 1.0)):
+    def p_sample(model , x_t , t, betas ,clip_range=(-1.0, 1.0) , clip_denoised=True):
         
         # Initialize alphas
         # Compute alphas and alpha_bars
@@ -28,9 +28,10 @@ class ReverseDiffusion:
         sqrt_alpha_bar_t = torch.sqrt(alpha_bar_t)
         x0_pred = (x_t - sqrt_one_minus_alpha_bar_t * epsilon_theta) / sqrt_alpha_bar_t
 
-        # 3. Optional clipping
-        low, high = clip_range
-        x0_pred = torch.clamp(x0_pred, low, high)
+        # 3. Clip x0_pred to specified range
+        if clip_denoised:
+            low, high = clip_range
+            x0_pred = torch.clamp(x0_pred, low, high)
 
         # 4. Compute epsilon used for posterior mean calculation
         epsilon_used = (x_t - sqrt_alpha_bar_t * x0_pred) / sqrt_one_minus_alpha_bar_t

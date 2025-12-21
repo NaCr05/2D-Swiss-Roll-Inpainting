@@ -10,38 +10,53 @@ def get_optimal_num_workers():
 
 class OxfordPetLoader:
     def __init__(self, root='./data', batch_size=8, image_size=256, download=True, cat_only=True):
-        """
-        Oxford-IIIT Pet Dataset Loader.
-        cat_only: If True, only load cat breeds (Oxford Pet labels 1-12 are cats).
-        """
         self.root = root
         self.batch_size = batch_size
         
-        # Image transformations
         self.transform = transforms.Compose([
-            transforms.Resize(image_size), # Resize to image_size
-            transforms.CenterCrop(image_size), # Center crop
-            transforms.ToTensor(), # Convert to tensor
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)) # Normalize to [-1, 1]
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
         
-        # Download and load full dataset
         full_dataset = datasets.OxfordIIITPet(
             root=root, 
-            split='trainval',  # Use trainval split
-            target_types='category',  # Load category labels
-            download=download, # Download if not present
-            transform=self.transform # Apply transformations
+            split='trainval', 
+            target_types='category', 
+            download=download,
+            transform=self.transform
         )
         
         if cat_only:
-            # Species mapping: 1 is Cat, 2 is Dog
-            # In Oxford Pet, you can filter by species
-            cat_indices = [i for i, (_, species) in enumerate(full_dataset) if species == 1]
-            self.dataset = torch.utils.data.Subset(full_dataset, cat_indices) # Filter for cats only
+            # 1. Define cat breeds
+            cat_breeds = [
+                "Abyssinian", "Bengal", "Birman", "Bombay", "British Shorthair", 
+                "Egyptian Mau", "Maine Coon", "Persian", "Ragdoll", "Russian Blue", 
+                "Siamese", "Sphynx"
+            ]
+            
+            # 2. Get corresponding label IDs
+            # full_dataset.class_to_idx 是一個 dict {'Abyssinian': 0, ...}
+            cat_ids = set()
+            for cat in cat_breeds:
+                if cat in full_dataset.class_to_idx:
+                    cat_ids.add(full_dataset.class_to_idx[cat])
+            
+            print(f"Cat Label IDs: {cat_ids}")
+
+            # 3. Filter dataset for cat images only
+            # OxfordIIITPet does not provide direct access to labels, so we access the private attribute
+            # full_dataset._labels is a list of labels corresponding to each image
+            all_labels = full_dataset._labels 
+            
+            cat_indices = [i for i, label in enumerate(all_labels) if label in cat_ids]
+            
+            self.dataset = torch.utils.data.Subset(full_dataset, cat_indices)
             print(f"Filtered Oxford-Pet for Cats. Total Images: {len(self.dataset)}")
         else:
             self.dataset = full_dataset
+
 
     def get_loader(self):
         return DataLoader(

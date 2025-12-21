@@ -43,11 +43,11 @@ def run_reverse_process():
     
     # Hyperparameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    TIMESTEPS = 1000
-    N_IMAGE = 5    
-    BATCH_SIZE = 5
+    TIMESTEPS = 500
+    N_IMAGE = 16    
+    BATCH_SIZE = 16
     LR = 1e-3
-    EPOCHS = 20000
+    EPOCHS = 40000
     if device.type == 'cuda':
         print(f"  >> GPU Name: {torch.cuda.get_device_name(0)}")
         print(f"  >> cuDNN Version: {torch.backends.cudnn.version()}")
@@ -66,7 +66,8 @@ def run_reverse_process():
     imgs, _ = next(iter(data_loader))
     imgs = imgs[:N_IMAGE].to(device)
     print(f"Dataset Loaded. Image shape: {imgs.shape}")
-    
+
+
     # Model Initialization
     model = DiffUNet(input_channels=3, time_dim=128).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
@@ -108,26 +109,32 @@ def run_reverse_process():
     # Visualize Reverse Diffusion Process
     print("Generating reverse diffusion process...")
     model.eval()
-    frames = []
-    
-    with torch.no_grad():
-        # Start from pure noise
-        x_cur = torch.randn(N_IMAGE, 3, 256, 256).to(device)
+    for i in range(3):  # Generate 3 samples
+        frames = []
         
-        for t in reversed(range(TIMESTEPS)):
-            # Perform one reverse diffusion step
-            x_cur = ReverseDiffusion.p_sample(model, x_cur, t, forward_diffusion.betas)
+        with torch.no_grad():
+            # Start from pure noise
+            x_cur = torch.randn(1, 3, 256, 256).to(device)
             
-            # Save frame every 10 timesteps
-            if t % 10 == 0:
-                x_images = tensor_to_image(x_cur)
-                # Stack all images horizontally (or in a grid for better visualization)
-                # For simplicity, we'll use the first image from the batch
-                frames.append(x_images[0])
-        
-        # Save as GIF
-        imageio.mimsave('Plot/ddpm_cat_reverse_process.gif', frames, fps=10, loop=0)
-        print("Saved Plot/ddpm_cat_reverse_process.gif")
+            for t in reversed(range(TIMESTEPS)):
+                # Perform one reverse diffusion step
+                x_cur = ReverseDiffusion.p_sample(model, x_cur, t, forward_diffusion.betas)
+                
+                # Save frame every 10 timesteps
+                if t % 10 == 0:
+                    x_images = tensor_to_image(x_cur)
+                    # Stack all images horizontally (or in a grid for better visualization)
+                    # For simplicity, we'll use the first image from the batch
+                    frames.append(x_images[0])
+                
+                # Add pause at the beginning
+                if t == 0:
+                    for _ in range(10):
+                        frames.append(x_images[0])
+            
+            # Save as GIF
+            imageio.mimsave(f'Plot/ddpm_cat_reverse_process_{i}.gif', frames, fps=10, loop=0)
+            print(f"Saved Plot/ddpm_cat_reverse_process_{i}.gif")
 
 
 

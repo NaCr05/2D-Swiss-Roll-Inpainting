@@ -12,7 +12,7 @@ def run_forward_process():
     
     # Configurations
     TIMESTEPS = 200
-    N_SAMPLES = 40
+    N_SAMPLES = 50
     
     # Initialize the forward diffusion process
     forward_diffusion = ForwardDiffusion(timesteps=TIMESTEPS, beta_start=1e-4, beta_end=0.02)
@@ -108,7 +108,7 @@ def run_reverse_process():
     with torch.no_grad():
         for t in reversed(range(TIMESTEPS)):
 
-            x_cur = ReverseDiffusion.p_sample(model, x_cur, t, forward_diffusion.betas)
+            x_cur = ReverseDiffusion.p_sample(model, x_cur, t, forward_diffusion.betas , clip_denoised=False)
             if t % 5 != 0:
                 continue
             
