@@ -12,43 +12,23 @@ from Dataset import OxfordPetLoader
 
 
 def tensor_to_image(x_tensor, mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)):
-    """Convert a batch tensor to uint8 images undoing normalization.
-
-    Args:
-        x_tensor: torch.Tensor, shape [B, C, H, W], model outputs in normalized space.
-        mean, std: tuples for per-channel Normalize used in Dataset (default maps [-1,1]<->[0,1]).
-
-    Returns:
-        numpy array of uint8 images with shape [B, H, W, C]
-    """
-    # Ensure tensor on CPU and float
-    x = x_tensor.detach().cpu().float()
-
-    # If dataset used Normalize(mean, std) after ToTensor, undo it here:
-    # x_orig = x * std + mean  (applied per-channel)
-    mean = torch.tensor(mean, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
-    std = torch.tensor(std, dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
-
-    x = x * std + mean
-
-    # Clip to [0,1] for safety, then convert to [0,255]
-    x = torch.clamp(x, 0.0, 1.0)
-
-    x_np = x.numpy()
+    
+    x_np = (x_tensor + 1.0) / 2.0  # Scale from [-1, 1] to [0, 1]
+    x_np = x_np.clamp(0.0, 1.0).cpu().numpy()
     x_np = np.transpose(x_np, (0, 2, 3, 1))  # [B, H, W, C]
     x_np = (x_np * 255.0).round().astype(np.uint8)
-    return x_np
 
+    return x_np
 
 def run_reverse_process():
     
     # Hyperparameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     TIMESTEPS = 1000
-    N_IMAGE = 3    
-    BATCH_SIZE = 3
+    N_IMAGE = 1    
+    BATCH_SIZE = 1
     LR = 1e-3
-    EPOCHS = 10000
+    EPOCHS = 100000
     if device.type == 'cuda':
         print(f"  >> GPU Name: {torch.cuda.get_device_name(0)}")
         print(f"  >> cuDNN Version: {torch.backends.cudnn.version()}")
@@ -66,7 +46,8 @@ def run_reverse_process():
     # Fetch images for training
     imgs, _ = next(iter(data_loader))
     imgs = imgs[:N_IMAGE].to(device)
-    print(f"Dataset Loaded. Image shape: {imgs.shape}")
+    
+
 
 
     # Model Initialization
@@ -120,11 +101,11 @@ def run_reverse_process():
 
             
     print("Training Completed.")
-    
+    GEN_SAMPLES = 1
     # Visualize Reverse Diffusion Process
     print("Generating reverse diffusion process...")
     #model.eval()
-    for i in range(3):  # Generate 3 samples
+    for i in range(GEN_SAMPLES):  # Generate 3 samples
         frames = []
         
         with torch.no_grad():
