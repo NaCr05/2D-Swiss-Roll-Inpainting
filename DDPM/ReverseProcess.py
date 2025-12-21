@@ -13,7 +13,16 @@ class ReverseDiffusion:
         alphas = 1.0 - betas
         beta_t = betas[t]
         alpha_t = alphas[t]
-        alpha_bar_t = torch.prod(alphas[:t+1])
+        alpha_bar = torch.cumprod(alphas, dim=0)
+        alpha_bar_t = alpha_bar[t]
+        if t > 0:
+            alpha_bar_prev = alpha_bar[t-1]
+        else:
+            alpha_bar_prev = torch.tensor(1.0, device=x_t.device)
+            
+        # Compute posterior variance
+        posterior_variance = beta_t * (1. - alpha_bar_prev) / (1. - alpha_bar_t)
+        
         
         # Pre-calculate square roots
         sqrt_alpha_t = torch.sqrt(alpha_t)
@@ -41,6 +50,7 @@ class ReverseDiffusion:
         
         if t > 0:
             z = torch.randn_like(x_t)
-            return mean + torch.sqrt(beta_t) * z
+            sigma = torch.sqrt(posterior_variance)
+            return mean + sigma * z
         else:
             return mean

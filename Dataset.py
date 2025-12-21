@@ -8,6 +8,9 @@ def get_optimal_num_workers():
     cores = os.cpu_count() or 1
     return max(1, cores - 1)
 
+# ---------------------------------
+# Oxford-IIIT Pet Dataset Loader (Cats Only)
+# ---------------------------------
 class OxfordPetLoader:
     def __init__(self, root='./data', batch_size=8, image_size=256, download=True, cat_only=True):
         self.root = root

@@ -48,7 +48,7 @@ def run_reverse_process():
     N_IMAGE = 3    
     BATCH_SIZE = 3
     LR = 1e-3
-    EPOCHS = 40000
+    EPOCHS = 10000
     if device.type == 'cuda':
         print(f"  >> GPU Name: {torch.cuda.get_device_name(0)}")
         print(f"  >> cuDNN Version: {torch.backends.cudnn.version()}")
@@ -73,6 +73,9 @@ def run_reverse_process():
     model = DiffUNet(input_channels=3, time_dim=128).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     loss_function = torch.nn.MSELoss()
+    # Learning rate scheduler (optional)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
+
     
     # Initialize a copy of the model for EMA (Exponential Moving Average)
     ema_model = EMA(model, beta=0.995)
@@ -106,7 +109,9 @@ def run_reverse_process():
         optimizer.step()
         # Update EMA model
         ema_model.update(model)
-        
+        # Step the learning rate scheduler
+        scheduler.step()
+
         total_loss += loss.item()
         avg_loss = total_loss / N_IMAGE
         time_end = time.time()
@@ -130,20 +135,20 @@ def run_reverse_process():
                 # Perform one reverse diffusion step
                 x_cur = ReverseDiffusion.p_sample(ema_model.ema_model, x_cur, t, forward_diffusion.betas)
                 
-                # Save frame every 10 timesteps
-                if t % 10 == 0:
-                    x_images = tensor_to_image(x_cur)
-                    # Stack all images horizontally (or in a grid for better visualization)
-                    # For simplicity, we'll use the first image from the batch
-                    frames.append(x_images[0])
+                if t % 10 != 0:
+                    continue
+                x_images = tensor_to_image(x_cur)
+                # Stack all images horizontally (or in a grid for better visualization)
+                # For simplicity, we'll use the first image from the batch
+                frames.append(x_images[0])
                 
                 # Add pause at the beginning
                 if t == 0:
-                    for _ in range(10):
+                    for _ in range(30):
                         frames.append(x_images[0])
             
             # Save as GIF
-            imageio.mimsave(f'Plot/ddpm_cat_reverse_process_{i}.gif', frames, fps=10, loop=0)
+            imageio.mimsave(f'Plot/ddpm_cat_reverse_process_{i}.gif', frames, fps=30, loop=0)
             print(f"Saved Plot/ddpm_cat_reverse_process_{i}.gif")
 
 

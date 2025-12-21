@@ -5,6 +5,10 @@ import torch.optim as optim
 
 from DDPM.ForwardProcess import ForwardDiffusion
 
+
+# ---------------------------------
+# EMA (Exponential Moving Average) Class
+# ---------------------------------
 class EMA:
     def __init__(self, model, beta = 0.995):
         self.beta = beta
@@ -97,7 +101,7 @@ class NoisePredictor(nn.Module):
         print("Training Completed.")
         
 # ---------------------------------
-# DiffUNet Model (Optional - Not used in current implementation)
+# Block Module 
 # ---------------------------------
 class Block(nn.Module):
     def __init__(self, in_channels, out_channels, time_dim):
@@ -134,7 +138,10 @@ class Block(nn.Module):
         x = self.gn2(x)
         x = torch.relu(x)
         return x
-    
+
+# ---------------------------------
+# DiffUNet Model
+# ---------------------------------
 class DiffUNet(nn.Module):
     def __init__(self, input_channels=3, time_dim=32):
         super().__init__()
