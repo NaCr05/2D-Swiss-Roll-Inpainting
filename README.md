@@ -20,7 +20,6 @@ This is a **PyTorch** implementation of the **Denoising Diffusion Probabilistic 
 ├── DDPM_Swiss_Roll.py      # Training and visualization script for the 2D Swiss Roll dataset
 ├── Dataset.py              # Data loader (supports Oxford-IIIT Pet cat breeds)
 ├── Plot/                   # Directory to store training results and generated GIFs
-├── data/                   # Directory for dataset storage
 └── README.md               # Project documentation
 ```
 
