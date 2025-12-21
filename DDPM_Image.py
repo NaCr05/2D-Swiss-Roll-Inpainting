@@ -5,8 +5,9 @@ import imageio
 import numpy as np
 
 from DDPM.ForwardProcess import ForwardDiffusion
-from DDPM.NoisePredictor import DiffUNet
 from DDPM.ReverseProcess import ReverseDiffusion
+from DDPM.NoisePredictor import DiffUNet
+from DDPM.NoisePredictor import EMA
 from Dataset import OxfordPetLoader
 
 
@@ -43,9 +44,9 @@ def run_reverse_process():
     
     # Hyperparameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    TIMESTEPS = 500
-    N_IMAGE = 16    
-    BATCH_SIZE = 16
+    TIMESTEPS = 1000
+    N_IMAGE = 3    
+    BATCH_SIZE = 3
     LR = 1e-3
     EPOCHS = 40000
     if device.type == 'cuda':
@@ -73,6 +74,9 @@ def run_reverse_process():
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     loss_function = torch.nn.MSELoss()
     
+    # Initialize a copy of the model for EMA (Exponential Moving Average)
+    ema_model = EMA(model, beta=0.995)
+    
     # Training Loop
     print(f"Start Training ({EPOCHS} steps)...")
     for epoch in range(EPOCHS):
@@ -95,7 +99,13 @@ def run_reverse_process():
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping (optional, can help with stability)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)       
+        # Update parameters
         optimizer.step()
+        # Update EMA model
+        ema_model.update(model)
         
         total_loss += loss.item()
         avg_loss = total_loss / N_IMAGE
@@ -108,7 +118,7 @@ def run_reverse_process():
     
     # Visualize Reverse Diffusion Process
     print("Generating reverse diffusion process...")
-    model.eval()
+    #model.eval()
     for i in range(3):  # Generate 3 samples
         frames = []
         
@@ -118,7 +128,7 @@ def run_reverse_process():
             
             for t in reversed(range(TIMESTEPS)):
                 # Perform one reverse diffusion step
-                x_cur = ReverseDiffusion.p_sample(model, x_cur, t, forward_diffusion.betas)
+                x_cur = ReverseDiffusion.p_sample(ema_model.ema_model, x_cur, t, forward_diffusion.betas)
                 
                 # Save frame every 10 timesteps
                 if t % 10 == 0:

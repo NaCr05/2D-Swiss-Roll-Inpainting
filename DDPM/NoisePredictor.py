@@ -1,8 +1,33 @@
+import copy
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 from DDPM.ForwardProcess import ForwardDiffusion
+
+class EMA:
+    def __init__(self, model, beta = 0.995):
+        self.beta = beta
+        self.step = 0
+        
+        # Create a copy of the model for EMA
+        self.ema_model = copy.deepcopy(model)
+
+        # Freeze the EMA model parameters
+        for param in self.ema_model.parameters():
+            param.requires_grad_(False)
+    def update(self, model):
+        self.step += 1
+        
+        for current_param , ema_param in zip(model.parameters(), self.ema_model.parameters()):
+            # Update EMA parameter 
+            ema_param.data.mul_(self.beta)
+            ema_param.data.add_(current_param.data * (1.0 - self.beta))
+    def copy_to(self, model):
+        model.load_state_dict(self.ema_model.state_dict())
+    
+    def save_pretrained(self, path):
+        torch.save(self.ema_model.state_dict(), path)
 
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
@@ -91,6 +116,7 @@ class Block(nn.Module):
 
 
     def forward(self, x, t):
+        
         # 1. Conv + GN + ReLU
         x = self.conv1(x)
         x = self.gn1(x)
