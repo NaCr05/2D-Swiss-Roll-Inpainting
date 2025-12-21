@@ -4,6 +4,8 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange)](https://pytorch.org/)
 [![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-Latest-green)](https://scikit-learn.org/)
 
+HackMD Article : https://hackmd.io/@bGCXESmGSgeAArScMaBxLA/HkcbC12zWe
+
 這是一個基於 PyTorch 實現的 **去噪擴散概率模型 (DDPM)**。本專案包含從 2D 玩具資料集 (Swiss Roll) 到複雜影像集 (Oxford Pets) 的完整實作，旨在展示擴散模型的前向 (Forward) 擴散與反向 (Reverse) 去噪過程。
 
 ## 📂 專案結構 (Project Structure)
