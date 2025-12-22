@@ -25,8 +25,8 @@ def run_reverse_process():
     # Hyperparameters
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     TIMESTEPS = 1000
-    N_IMAGE = 1    
-    BATCH_SIZE = 1
+    N_IMAGE = 3    
+    BATCH_SIZE = 3
     LR = 1e-3
     EPOCHS = 100000
     if device.type == 'cuda':
