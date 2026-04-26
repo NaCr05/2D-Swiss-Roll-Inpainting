@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from DDPM.ForwardProcess import ForwardDiffusion
+from DDIM.ForwardProcess import ForwardDiffusion
 
 
 # ---------------------------------
