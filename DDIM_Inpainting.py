@@ -214,27 +214,32 @@ def build_ddim_timestep_sequence(timesteps: int, ddim_steps: int):
 
 def run_inpainting(
     model: nn.Module,
+    x_full: torch.Tensor,
     x_known: torch.Tensor,
     x_GT_masked: torch.Tensor,
     mask_indices: list,
+    nonmask_indices: list,
     cfg: Config,
     device: torch.device,
-    forward_diffusion: Optional[ForwardDiffusion] = None,
 ):
     """
-    PID-guided DDIM inpainting loop, powered by AugmentedMDP.
+    Global-noise DDIM inpainting powered by AugmentedMDP.
 
-    Core idea: The noise predictor only sees the MASKED region.
-    DDIM reverse sampling is performed ONLY on masked points, driven by boundary
-    gradient signals. This prevents the model from "resetting" to a full Swiss Roll.
+    Key design:
+      - x_init: ALL 3000 points are initialized with pure Gaussian noise.
+        The noise predictor operates on the full dataset (it was trained for this),
+        which is the most natural and stable setting.
+      - Each DDIM step:
+          1. Full unconditional DDIM denoise on all points
+          2. Anchor known pixels back to original clean values
+          3. Manifold pull on masked region (boundary-guided)
+      - The known pixels are never degraded because they're reset every step.
 
-    Augmented MDP state: S_t = [x_t; I_t; D_t; e_t; bar_e_t] ∈ R^10
-    Action:           a_t = SNR_lock ⊙ (Kp·e_t + Ki·I_t + Kd·D_t)
-    Environment:       frozen DDIM model applied to masked region only
-    Reward:           r_t = -loss_boundary = -MSE(边界x̂₀ ↔ 最近邻已知点)
+    Augmented MDP state: S_t = [x_t; I_t; D_t; e_t; bar_e_t]
+    Reward: r_t = -loss_boundary = -MSE(边界inpainted ↔ 最近邻已知)
 
     Returns:
-        x_inpainted: Final inpainted points for masked region
+        x_inpainted: Final inpainted points for masked region [N_mask, 2]
         history:     Dict of per-step logged scalars
     """
     pid = PIDController(
@@ -248,36 +253,47 @@ def run_inpainting(
         theta_sigmoid=cfg.THETA_SIGMOID,
     )
 
+    N_total = len(x_full)
     N_mask = len(mask_indices)
     alphas = (1.0 - torch.linspace(cfg.BETA_START, cfg.BETA_END, cfg.TIMESTEPS)).to(device)
     alpha_bar = torch.cumprod(alphas, dim=0)
 
-    # ── x_init: sample from forward process at t=first_DDIM_step ──────────
-    # We add Gaussian noise to the known-data mean at t=first_DDIM_step,
-    # giving a physically grounded starting noise level near the data manifold.
-    ddim_timesteps = build_ddim_timestep_sequence(cfg.TIMESTEPS, cfg.DDIM_STEPS)
-    t_start = ddim_timesteps[0]
-    noise_init = torch.randn(N_mask, 2, device=device)
-    x_mean = x_known.mean(dim=0, keepdim=True)          # [1, 2]
-    x_mean_expanded = x_mean.expand(N_mask, -1)         # [N_mask, 2]
-    sqrt_ab_t = torch.sqrt(alpha_bar[t_start])
-    sqrt_1m_ab_t = torch.sqrt((1.0 - alpha_bar[t_start]).clamp(min=1e-8))
-    x_init = sqrt_ab_t * x_mean_expanded + sqrt_1m_ab_t * noise_init
+    # ── x_init: full dataset is pure Gaussian noise ───────────────────────
+    # This is the natural starting point for DDIM — it was trained to denoise
+    # from this exact distribution. No prior bias.
+    x_init_full = torch.randn(N_total, 2, device=device)   # norm ≈ √2 ≈ 1.41
 
-    ddim_timesteps = build_ddim_timestep_sequence(cfg.TIMESTEPS, cfg.DDIM_STEPS)
-    step_size = cfg.TIMESTEPS // cfg.DDIM_STEPS
-
-    # Re-compute boundary indices from x_init (not from x_known)
-    boundary_indices = find_boundary_indices(x_init)
+    # ── Boundary indices: within the MASK region, near its edges ────────────
+    # These are the "interface" between known and masked regions.
+    # We'll pass these as offsets into the masked-subset array.
+    boundary_mask = torch.zeros(N_mask, dtype=torch.bool)
+    EPS_B = 0.05
+    mask_coords = x_init_full[mask_indices]   # [N_mask, 2]
+    from DDIM.BoundaryMetrics import MASK_X_MIN, MASK_X_MAX, MASK_Y_MIN, MASK_Y_MAX
+    for i, idx in enumerate(mask_indices):
+        pt = x_full[idx]   # use original GT coords to determine boundary (not noisy)
+        d = min(
+            pt[0].item() - MASK_X_MIN,
+            MASK_X_MAX - pt[0].item(),
+            pt[1].item() - MASK_Y_MIN,
+            MASK_Y_MAX - pt[1].item(),
+        )
+        if d <= EPS_B:
+            boundary_mask[i] = True
+    boundary_indices = torch.where(boundary_mask)[0].tolist()
 
     # ── Build AugmentedMDP ─────────────────────────────────────────────
     mdp = AugmentedMDP(
         pid_controller=pid,
         x_known=x_known,
+        mask_indices=mask_indices,
         boundary_indices=boundary_indices,
         x_GT_masked=x_GT_masked,
     )
-    x_cur = mdp.reset(x_init)
+    x_cur_full = mdp.reset(x_init_full)
+
+    ddim_timesteps = build_ddim_timestep_sequence(cfg.TIMESTEPS, cfg.DDIM_STEPS)
+    step_size = cfg.TIMESTEPS // cfg.DDIM_STEPS
 
     # History for convergence curves
     history = {
@@ -294,14 +310,14 @@ def run_inpainting(
         "x_cur_frames": [],
     }
 
-    print(f"[Inpainting] {len(ddim_timesteps)} DDIM steps | {N_mask} masked points")
+    print(f"[Inpainting] {len(ddim_timesteps)} DDIM steps | {N_mask} masked / {N_total} total")
 
     for step_idx, t in enumerate(ddim_timesteps):
         prev_t = max(0, t - step_size)
 
-        # One MDP step: masked-region DDIM + PID steering + reward
-        x_cur, r_t, info = mdp.step(
-            x_mask=x_cur,
+        # One MDP step: full DDIM + known-pixel anchor + manifold pull
+        x_cur_full, r_t, info = mdp.step(
+            x_full=x_cur_full,
             model=model,
             alpha_bar=alpha_bar,
             t=t,
@@ -320,9 +336,11 @@ def run_inpainting(
         history["a_t_norm_list"].append(info["a_t_norm"])
         history["bar_e_norm_list"].append(info["bar_e_norm"])
         history["snr_scaling_list"].append(info["blend_lambda"])
-        history["x_cur_frames"].append(x_cur.detach().cpu().clone())
+        history["x_cur_frames"].append(x_cur_full[mask_indices].detach().cpu().clone())
 
-    return x_cur.detach(), history
+    # Extract final inpainted region
+    x_inpainted = x_cur_full[mask_indices].detach()
+    return x_inpainted, history
 
 
 # =============================================================================
@@ -525,13 +543,6 @@ def main():
     print(f"  Masked (to inpaint): {len(mask_indices)}")
     print(f"  Known (non-masked): {len(nonmask_indices)}")
 
-    # Build forward_diffusion once (needed for x_init initialization)
-    forward_diff = ForwardDiffusion(
-        timesteps=cfg.TIMESTEPS,
-        beta_start=cfg.BETA_START,
-        beta_end=cfg.BETA_END,
-    ).to(device)
-
     # ── 2. Train ───────────────────────────────────────────────────────────
     print("\n[2] Training NoisePredictor ...")
     model = train_model(x_full, cfg, device)
@@ -539,15 +550,16 @@ def main():
     model.to(device)
 
     # ── 3. Inpainting ──────────────────────────────────────────────────────
-    print("\n[3] PID-Guided DDIM Inpainting ...")
+    print("\n[3] Global-Noise DDIM Inpainting ...")
     x_inpainted, history = run_inpainting(
         model=model,
+        x_full=x_full.to(device),
         x_known=x_known,
         x_GT_masked=x_GT_masked,
         mask_indices=mask_indices,
+        nonmask_indices=nonmask_indices,
         cfg=cfg,
         device=device,
-        forward_diffusion=forward_diff,
     )
 
     # ── 4. Final Metrics ────────────────────────────────────────────────────

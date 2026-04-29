@@ -1,22 +1,19 @@
 """
 DDIM/AugmentedMDP.py
 ====================
-Augmented MDP state maintenance, reward computation, and transition wrapper.
+Augmented MDP for global-noise DDIM inpainting.
 
-State space S_t = [x_t; I_t; D_t; e_t; bar_e_t] ∈ R^10
-  x_t:     Current noisy latent, dim 2
-  I_t:     Integral memory (clipped), dim 2
-  D_t:     Derivative trend (EMA-scale), dim 2
-  e_t:     Instantaneous error (autograd gradient), dim 2
-  bar_e_t: EMA-smoothed error, dim 2
+The key design: at each DDIM step we operate on the FULL dataset (known + masked).
+We let the noise predictor denoise the full dataset (it was trained on this), then
+re-anchor the known pixels to their original clean values, and finally apply a
+manifold pull only on the masked region.
 
-Transition (PINN-guided masked DDIM):
-  xhat_0  = Tweedie(x_t, eps_θ)                   ← manifold estimate
-  x_{t-1} = DDIM_step(xhat_0, t→t-1)             ← one DDIM reverse step
-  x_{t-1}* = (1-λ)·x_{t-1} + λ·nearest_known    ← direct manifold pull (full strength)
+Transition per step:
+  x_full_ddim = DDIM_step(x_full_t, t→t-1)         ← full unconditional denoise
+  x_full_t-1 = (known → original_clean) + (mask → manifold_pull(x_ddim_mask))
 
 Reward:
-  r_t = -loss_boundary = -MSE(边界x̂₀ ↔ 最近邻已知点)
+  r_t = -loss_boundary = -MSE(边界inpainted ↔ 最近邻已知)
 """
 
 import torch
@@ -31,59 +28,65 @@ class AugmentedMDP:
         self,
         pid_controller: PIDController,
         x_known: torch.Tensor,
+        mask_indices: List[int],
         boundary_indices: Optional[List[int]] = None,
         x_GT_masked: Optional[torch.Tensor] = None,
     ):
+        """
+        Args:
+            pid_controller:  PID controller for history tracking
+            x_known:         Known (non-masked) points, shape [N_known, 2]
+            mask_indices:    Indices of masked points in the FULL dataset
+            boundary_indices: Indices within mask region near the boundary
+            x_GT_masked:     Ground truth for masked region (for mse_t logging)
+        """
         self.pid = pid_controller
         self.x_known = x_known
-        self.boundary_indices = boundary_indices or []
-        self.x_GT_masked = x_GT_masked
+        self.mask_indices = mask_indices              # e.g. [0, 5, 12, ...] in full data
+        self.boundary_indices = boundary_indices or []  # within mask_indices
+        self.x_GT_masked = x_GT_masked              # [N_mask, 2]
 
-        self._x_cur: Optional[torch.Tensor] = None
+        self._x_cur_full: Optional[torch.Tensor] = None  # [N_full, 2]
         self._step_count: int = 0
 
-    def reset(self, x_init: torch.Tensor) -> torch.Tensor:
+    def reset(self, x_init_full: torch.Tensor) -> torch.Tensor:
+        """Reset MDP with full initial state (global noise)."""
         self.pid.reset()
-        self._x_cur = x_init.detach().clone()
+        self._x_cur_full = x_init_full.detach().clone()
         self._step_count = 0
-        return self._x_cur
+        return self._x_cur_full
 
     def step(
         self,
-        x_mask: torch.Tensor,
+        x_full: torch.Tensor,
         model: torch.nn.Module,
         alpha_bar: torch.Tensor,
         t: int,
         prev_t: int,
     ) -> Tuple[torch.Tensor, float, dict]:
         """
-        One step of the Augmented MDP for masked-region inpainting.
+        One DDIM step on the full dataset with known-pixel anchoring.
 
-        Core loop:
-          1. Noise prediction for masked region only
-          2. Tweedie estimate xhat_0 = (x_t - √(1-ᾱ)·ε_θ) / √ᾱ
-          3. DDIM one-step: x_{t-1} from xhat_0
-          4. Direct manifold pull: x_{t-1}* = (1-λ)·x_{t-1} + λ·nearest_known
-             λ is large (0.7) to bring the result toward the Swiss Roll manifold
-
-        Key insight: we correct x_{t-1} directly, NOT xhat_0.
-        This avoids the √(1-ᾱ) decay that prevented corrections from propagating
-        in previous versions.
+        Pipeline:
+          1. DDIM one-step on full noisy data → unconditional denoise
+          2. Reset known pixels to their original clean values (anchor)
+          3. Manifold pull on masked region only (boundary-guided)
 
         Args:
-            x_mask:    Current masked latent, shape [N_mask, 2]
+            x_full:    Current full state (known + masked), shape [N_full, 2]
             model:     Frozen DDIM noise predictor
             alpha_bar: Cumulative alpha bar, shape [T]
             t:         Current DDIM timestep
             prev_t:    Previous DDIM timestep
 
         Returns:
-            x_next:  Next masked latent x_{t-1} (after manifold pull)
-            r_t:     Scalar reward for this step
-            info:    Dict with all state metrics
+            x_next_full: Next full state [N_full, 2]
+            r_t:        Scalar reward (negative boundary loss)
+            info:       Dict of per-step metrics
         """
-        device = x_mask.device
-        N_mask = x_mask.shape[0]
+        device = x_full.device
+        N_full = x_full.shape[0]
+        N_mask = len(self.mask_indices)
 
         ab_t = alpha_bar[t]
         ab_prev = alpha_bar[prev_t] if prev_t >= 0 else torch.tensor(1.0, device=device)
@@ -92,50 +95,60 @@ class AugmentedMDP:
         sqrt_ab_prev = torch.sqrt(ab_prev)
         sqrt_1m_ab_prev = torch.sqrt((1.0 - ab_prev).clamp(min=1e-8))
 
-        # ── Step 1: Noise prediction for masked region ───────────────────
+        # ── Step 1: Full unconditional DDIM denoise ────────────────────
         with torch.no_grad():
-            t_tensor = torch.full((N_mask,), t, device=device, dtype=torch.long)
-            eps_pred = model(x_mask, t_tensor)
+            t_tensor = torch.full((N_full,), t, device=device, dtype=torch.long)
+            eps_pred = model(x_full, t_tensor)
 
-        # ── Step 2: Tweedie estimate of x̂₀ ─────────────────────────────
-        xhat_0 = (x_mask - sqrt_1m_ab_t * eps_pred) / sqrt_ab_t.clamp(min=1e-8)
+        xhat_0 = (x_full - sqrt_1m_ab_t * eps_pred) / sqrt_ab_t.clamp(min=1e-8)
 
-        # ── Step 3: DDIM one-step from xhat_0 ──────────────────────
+        # DDIM reverse step from xhat_0
+        pred_dir = (x_full - sqrt_ab_t * xhat_0) / sqrt_1m_ab_t
+        x_ddim = sqrt_ab_prev * xhat_0 + sqrt_1m_ab_prev * pred_dir   # [N_full, 2]
+
+        # ── Step 2: Anchor known pixels back to original clean values ────
+        x_known_original = self.x_known   # [N_known, 2] — stored in __init__
+        nonmask_mask = self._build_nonmask_mask(N_full, device)  # [N_full] bool
+        x_ddim[nonmask_mask] = x_known_original.to(x_ddim)
+
+        # ── Step 3: Manifold pull on masked region only ──────────────────
+        # Extract masked region after anchoring
+        x_mask_ddim = x_ddim[self.mask_indices]    # [N_mask, 2]
+
+        # λ adapts with noise level: high noise → larger pull
+        # Using 1 - ab_t ≈ 0.02-0.15: small but meaningful pull
+        # We scale it up: λ = clamp((1-ab_t) / 0.1, 0, 1) ∈ [0, 1]
+        blend_lambda = float(torch.clamp((1.0 - ab_t) / 0.1, 0.0, 1.0).item())
+
         with torch.no_grad():
-            pred_dir = (x_mask - sqrt_ab_t * xhat_0) / sqrt_1m_ab_t
-            x_ddim = sqrt_ab_prev * xhat_0 + sqrt_1m_ab_prev * pred_dir
-
-        # ── Step 4: Direct manifold pull on x_{t-1} ───────────────────
-        # λ = clamp(1-ᾱ, 0.3, 0.9): large enough to pull toward manifold.
-        # At t=196: λ≈0.7 → 70% toward nearest known.
-        # Near t=0: λ≈0.7 → 70% toward nearest known (ᾱ≈0.98 always).
-        # NOTE: λ is constant ≈ 0.7 because ᾱ ≈ 0.98 throughout.
-        blend_lambda = float(torch.clamp(1.0 - ab_t, 0.3, 0.9).item())
-
-        with torch.no_grad():
-            nn_idx = torch.cdist(x_ddim, self.x_known).argmin(dim=1)
+            nn_idx = torch.cdist(x_mask_ddim, self.x_known).argmin(dim=1)
             x_nearest = self.x_known[nn_idx]
 
-        x_next = (1.0 - blend_lambda) * x_ddim + blend_lambda * x_nearest
+        x_mask_corrected = (1.0 - blend_lambda) * x_mask_ddim + blend_lambda * x_nearest
 
-        # ── Step 5: Boundary loss (computed on xhat_0 for reward) ───────
-        loss_boundary = self._compute_boundary_loss(xhat_0)
+        # Rebuild full state
+        x_next_full = x_full.clone()
+        x_next_full[self.mask_indices] = x_mask_corrected
+
+        # ── Step 4: Boundary loss on corrected masked region ────────────
+        xhat_0_mask = xhat_0[self.mask_indices]   # [N_mask, 2]
+        loss_boundary = self._compute_boundary_loss(xhat_0_mask)
         r_t = float(-loss_boundary.item()) if loss_boundary is not None else 0.0
 
-        # ── Step 6: PID state update (history tracking only) ───────────
-        grad_per_point = self._get_boundary_grad_per_point(xhat_0)
-        e_t_scalar = grad_per_point.mean(dim=0, keepdim=True)
+        # ── Step 5: PID state update (history tracking) ──────────────────
+        grad_per_point = self._get_boundary_grad_per_point(xhat_0_mask)
+        e_t_scalar = grad_per_point.mean(dim=0, keepdim=True) if grad_per_point.numel() > 0 else torch.zeros(1, 2, device=device)
         ab_prev_for_pid = ab_prev if prev_t >= 0 else torch.tensor(1.0, device=device)
         a_t_dummy, u_t_dummy, snr_lock, bar_e_t, D_t = self.pid.compute_action(
             e_t_scalar, ab_t, ab_prev_for_pid
         )
 
-        # ── Step 7: Build info dict ─────────────────────────────────────
+        # ── Step 6: Build info dict ─────────────────────────────────────
         info = {
             "t": t,
             "prev_t": prev_t,
             "r_t": r_t,
-            "e_t_norm": float(grad_per_point.norm().item()),
+            "e_t_norm": float(grad_per_point.norm().item()) if grad_per_point.numel() > 0 else 0.0,
             "u_t_norm": float(u_t_dummy.norm().item()),
             "a_t_norm": float(a_t_dummy.norm().item()),
             "snr_lock": float(snr_lock.item()),
@@ -143,39 +156,42 @@ class AugmentedMDP:
             "D_t_norm": float(D_t.norm().item()),
             "blend_lambda": blend_lambda,
             "mse_t": float(
-                ((x_next - self.x_GT_masked) ** 2).mean().item()
+                ((x_mask_corrected - self.x_GT_masked) ** 2).mean().item()
                 if self.x_GT_masked is not None
                 else 0.0
             ),
         }
 
-        self._x_cur = x_next.detach()
+        self._x_cur_full = x_next_full.detach()
         self._step_count += 1
-        return x_next, r_t, info
+        return x_next_full, r_t, info
 
-    def _compute_boundary_loss(self, xhat_0: torch.Tensor) -> Optional[torch.Tensor]:
+    def _build_nonmask_mask(self, N_full: int, device: torch.device) -> torch.Tensor:
+        """Build a boolean mask [N_full] where True = known (non-masked)."""
+        mask = torch.zeros(N_full, dtype=torch.bool, device=device)
+        nonmask_indices = [i for i in range(N_full) if i not in self.mask_indices]
+        mask[nonmask_indices] = True
+        return mask
+
+    def _compute_boundary_loss(self, xhat_0_mask: torch.Tensor) -> Optional[torch.Tensor]:
+        """Boundary loss computed on the masked region's boundary vs known points."""
         if not self.boundary_indices or len(self.boundary_indices) == 0:
             return None
-        return compute_boundary_loss(xhat_0, self.x_known, self.boundary_indices)
+        # boundary_indices are offsets within mask_indices, not absolute indices
+        return compute_boundary_loss(xhat_0_mask, self.x_known, self.boundary_indices)
 
     def _get_boundary_grad_per_point(
         self,
-        xhat_0: torch.Tensor,
+        xhat_0_mask: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute ∂L_boundary/∂xhat_0[i] for ALL mask points.
-
-        L_boundary = mean over boundary points of ||x_boundary - nearest_known||²
-        Soft Gaussian nearest-neighbor: each boundary point connects to a
-        weighted-average of known points (Gaussian kernel), giving smoother gradients.
-        Then broadcast to all mask points via Gaussian proximity kernel.
-
-        Shape: [N_mask, 2]
+        Compute ∂L_boundary/∂xhat_0[i] for ALL masked points.
+        Soft Gaussian nearest-neighbor with proximity-weighted broadcast.
         """
         if not self.boundary_indices or len(self.boundary_indices) == 0:
-            return torch.zeros_like(xhat_0)
+            return torch.zeros_like(xhat_0_mask)
 
-        x_boundary = xhat_0[self.boundary_indices]
+        x_boundary = xhat_0_mask[self.boundary_indices]
         N_boundary = x_boundary.shape[0]
 
         sigma = 0.5
@@ -186,7 +202,7 @@ class AugmentedMDP:
         residual = x_boundary - x_nearest
         grad_boundary = 2.0 * residual / max(N_boundary, 1)
 
-        dist_to_boundary = torch.cdist(xhat_0, x_boundary) ** 2
+        dist_to_boundary = torch.cdist(xhat_0_mask, x_boundary) ** 2
         boundary_weights = torch.exp(-dist_to_boundary / (2 * sigma ** 2))
         boundary_weights = boundary_weights / (boundary_weights.sum(dim=1, keepdim=True) + 1e-8)
         grad_per_point = boundary_weights @ grad_boundary
